@@ -1,0 +1,167 @@
+name: Secure CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  integration-and-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install test dependencies
+        run: npm ci
+
+      - name: Start application over HTTP
+        run: docker compose up -d --build cert-generator db web nginx
+
+      - name: Wait for web application
+        shell: bash
+        run: |
+          for _ in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:8080/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs
+          exit 1
+
+      - name: Unit and HTTP integration tests
+        env:
+          BASE_URL: http://127.0.0.1:8080
+        run: |
+          npm run test:coverage
+          npm run test:integration
+
+      - name: Verify validated query was stored
+        shell: bash
+        run: |
+          rows="$(
+            docker compose exec -T \
+              -e MYSQL_PWD='2400620@SIT.singaporetech.edu.sg' \
+              db mysql -uadmin --batch --skip-column-names searchdb \
+              -e 'SELECT COUNT(*) FROM `2400620` WHERE query_time IS NOT NULL;'
+          )"
+          test "$rows" -ge 1
+
+      - name: Start Selenium Chrome
+        run: >-
+          docker run --detach --name selenium --network host
+          --shm-size=2g selenium/standalone-chrome:4.46.0-20260707
+
+      - name: Wait for Selenium
+        shell: bash
+        run: |
+          for _ in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:4444/status |
+              grep --quiet '"ready": true'; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs selenium
+          exit 1
+
+      - name: UI test over HTTP
+        env:
+          BASE_URL: http://127.0.0.1:8080
+          SELENIUM_URL: http://127.0.0.1:4444/wd/hub
+        run: npm run test:ui
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop test containers
+        if: always()
+        run: |
+          docker rm --force selenium 2>/dev/null || true
+          docker compose down --volumes
+
+  dependency-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install exact dependencies
+        run: npm ci
+
+      - name: npm dependency audit
+        run: npm audit --audit-level=high
+
+      - name: OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: ICT2216-2400620
+          path: .
+          format: HTML
+          out: reports/dependency-check
+          args: >-
+            --failOnCVSS 7
+            --disableOssIndex
+
+      - name: Upload dependency report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dependency-check-report
+          path: reports/dependency-check
+
+  eslint-security:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install exact dependencies
+        run: npm ci
+
+      - name: ESLint and eslint-plugin-security
+        run: |
+          mkdir -p reports
+          npm run lint
+          npm run security:eslint
+
+      - name: Upload ESLint SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: eslint-security-sarif
+          path: reports/eslint-security.sarif
+
+      - name: Publish ESLint findings to code scanning
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: reports/eslint-security.sarif

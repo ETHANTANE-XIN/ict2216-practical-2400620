@@ -1,0 +1,187 @@
+version: "2.4"
+
+services:
+  cert-generator:
+    build:
+      context: ./nginx
+      dockerfile: cert.Dockerfile
+    volumes:
+      - tls_certs:/certs
+    restart: "no"
+
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: searchdb
+      MYSQL_USER: admin
+      MYSQL_PASSWORD: 2400620@SIT.singaporetech.edu.sg
+      MYSQL_ROOT_PASSWORD: 2400620@SIT.singaporetech.edu.sg
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h localhost -uadmin -p'2400620@SIT.singaporetech.edu.sg' --silent"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  web:
+    build: .
+    environment:
+      PORT: 3000
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_NAME: searchdb
+      DB_USER: admin
+      DB_PASSWORD: 2400620@SIT.singaporetech.edu.sg
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - tls_certs:/etc/nginx/certs:ro
+    depends_on:
+      cert-generator:
+        condition: service_started
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+
+  git-server:
+    build:
+      context: ./gitea
+    container_name: git-server-2400620
+    environment:
+      USER_UID: 1000
+      USER_GID: 1000
+      ADMIN_PASSWORD: 2400620@SIT.singaporetech.edu.sg
+      ADMIN_EMAIL: 2400620@sit.singaporetech.edu.sg
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__database__PATH: /data/gitea/gitea.db
+      GITEA__server__DOMAIN: 127.0.0.1
+      GITEA__server__ROOT_URL: http://127.0.0.1:3001/
+      GITEA__server__HTTP_PORT: 3000
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__service__DISABLE_REGISTRATION: "true"
+    ports:
+      - "3001:3000"
+    volumes:
+      - gitea_data:/data
+      - ./:/seed:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS -u \"admin:$${ADMIN_PASSWORD}\" http://127.0.0.1:3000/api/v1/repos/admin/ict2216-practical-2400620/branches/main >/dev/null"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+    restart: unless-stopped
+
+  sonar-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: 2400620@SIT.singaporetech.edu.sg
+      POSTGRES_DB: sonar
+    volumes:
+      - sonar_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar -d sonar"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  sonarqube:
+    image: sonarqube:26.6.0.123539-community
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonar-db:5432/sonar
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: 2400620@SIT.singaporetech.edu.sg
+    ports:
+      - "9000:9000"
+    volumes:
+      - sonar_data:/opt/sonarqube/data
+      - sonar_extensions:/opt/sonarqube/extensions
+      - sonar_logs:/opt/sonarqube/logs
+    depends_on:
+      sonar-db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:9000/api/system/status | grep -q '\"status\":\"UP\"'"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    restart: unless-stopped
+
+  sonar-setup:
+    build:
+      context: ./sonar
+      dockerfile: setup.Dockerfile
+    environment:
+      SONAR_ADMIN_PASSWORD: 2400620@SIT.singaporetech.edu.sg
+    volumes:
+      - sonar_token:/token
+    depends_on:
+      sonarqube:
+        condition: service_healthy
+    restart: "no"
+
+  sonar-scanner:
+    build:
+      context: .
+      dockerfile: sonar/scanner.Dockerfile
+    environment:
+      SONAR_HOST_URL: http://sonarqube:9000
+      SONAR_ADMIN_PASSWORD: 2400620@SIT.singaporetech.edu.sg
+    volumes:
+      - sonar_token:/token:ro
+      - sonar_scanner_cache:/root/.sonar/cache
+    depends_on:
+      sonar-setup:
+        condition: service_started
+    restart: "no"
+
+volumes:
+  tls_certs:
+  mysql_data:
+  gitea_data:
+  sonar_db_data:
+  sonar_data:
+  sonar_extensions:
+  sonar_logs:
+  sonar_token:
+  sonar_scanner_cache:

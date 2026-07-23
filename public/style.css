@@ -1,0 +1,31 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+main {
+  max-width: 36rem;
+  margin: 4rem auto;
+  padding: 1rem;
+}
+
+form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+input,
+button,
+.button {
+  box-sizing: border-box;
+  padding: 0.7rem;
+  font: inherit;
+}
+
+#error {
+  color: #c62828;
+}
+
+.button {
+  display: inline-block;
+}
